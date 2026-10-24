@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Tide">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="theme-color" content="#bfe3f7">
+<link rel="apple-touch-icon" href="icon.png">
+<link rel="icon" href="icon.png">
+<title>Perranporth Tide</title>
+<style>
+  html, body { margin: 0; background: #fff; font-family: -apple-system, "Segoe UI", sans-serif; color: #123; }
+  body { display: flex; flex-direction: column; min-height: 100vh; min-height: 100dvh; }
+  header { background: #bfe3f7; text-align: center;
+           padding: calc(env(safe-area-inset-top) + 18px) 16px 14px; }
+  #state { font-size: 30px; font-weight: 800; margin: 0 0 8px; }
+  .info { font-size: 16px; margin: 4px 0; }
+  .small { font-size: 12px; color: #456; margin-top: 10px; }
+  canvas { display: block; width: 100%; }
+  #beach { flex: 1 1 0; min-height: 170px; }
+  #curve { height: 190px; margin-bottom: env(safe-area-inset-bottom); }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="state">Loading tide…</h1>
+  <div class="info" id="height"></div>
+  <div class="info" id="times"></div>
+  <div class="small" id="updated">Perranporth, Cornwall</div>
+</header>
+<canvas id="beach"></canvas>
+<canvas id="curve"></canvas>
+<script>
+const URL = "https://marine-api.open-meteo.com/v1/marine?latitude=50.35&longitude=-5.17" +
+            "&minutely_15=sea_level_height_msl&timezone=UTC&past_days=1&forecast_days=3";
+// The model point is ~12 km offshore: its tide runs ~30 min ahead of the beach, and
+// heights are from mean sea level, ~4.2 m above chart datum used by tide tables.
+const TIME_SHIFT = 30 * 60e3, DATUM = 4.2;
+const SAND = [236, 208, 150], SEA = [28, 108, 168];
+let series = [], fetched = 0;
+
+const hhmm = t => new Date(t).toLocaleTimeString("en-GB",
+  { hour: "2-digit", minute: "2-digit", timeZone: "Europe/London" });
+const blend = (a, b, f) => `rgb(${a.map((p, i) => Math.round(p + (b[i] - p) * f))})`;
+
+async function load() {
+  const d = (await (await fetch(URL)).json()).minutely_15;
+  series = d.time.map((t, i) => [Date.parse(t + "Z") + TIME_SHIFT, d.sea_level_height_msl[i]])
+                 .filter(p => p[1] != null).map(([t, h]) => [t, h + DATUM]);
+  fetched = Date.now();
+}
+
+function extremes() {
+  // Highs and lows, refined with a parabola through the three points around each.
+  const out = [];
+  for (let i = 1; i < series.length - 1; i++) {
+    const [t0, a] = series[i - 1], [t, b] = series[i], [, c] = series[i + 1];
+    if ((b > a && b >= c) || (b < a && b <= c)) {
+      const curve = a - 2 * b + c, x = curve ? (a - c) / (2 * curve) : 0;
+      out.push([t + (t - t0) * x, b - (a - c) * x / 4, b > a]);
+    }
+  }
+  return out;
+}
+
+function sizeCanvas(cv) {
+  const r = devicePixelRatio || 1, w = cv.clientWidth, h = cv.clientHeight;
+  cv.width = w * r; cv.height = h * r;
+  const g = cv.getContext("2d"); g.setTransform(r, 0, 0, r, 0, 0);
+  return [g, w, h];
+}
+
+function draw() {
+  const now = Date.now(), ext = extremes();
+  const prev = ext.filter(e => e[0] <= now).at(-1), next = ext.find(e => e[0] > now);
+  const rising = next[2];
+
+  // Tide follows roughly a half cosine between low and high water.
+  const p = (now - prev[0]) / (next[0] - prev[0]);
+  const height = prev[1] + (next[1] - prev[1]) * (1 - Math.cos(Math.PI * p)) / 2;
+  const low = Math.min(prev[1], next[1]), high = Math.max(prev[1], next[1]);
+  const frac = (height - low) / (high - low);          // 0 = low water, 1 = high water
+  const colour = rising ? "#1a8f3c" : "#d35400";
+
+  const state = document.getElementById("state");
+  state.textContent = rising ? "▲ TIDE COMING IN" : "▼ TIDE GOING OUT";
+  state.style.color = colour;
+  document.getElementById("height").textContent =
+    `Height ${height.toFixed(2)} m · ${Math.round(frac * 100)}% from low to high`;
+  document.getElementById("times").textContent =
+    `Last ${rising ? "low" : "high"} ${hhmm(prev[0])} (${prev[1].toFixed(1)} m) · ` +
+    `Next ${rising ? "high" : "low"} ${hhmm(next[0])} (${next[1].toFixed(1)} m)`;
+  document.getElementById("updated").textContent =
+    `Perranporth, Cornwall · heights above chart datum · ${hhmm(now)}`;
+
+  // Beach: dunes on the left, sand tinting towards sea colour, water advancing from the right
+  let [g, w, h] = sizeCanvas(document.getElementById("beach"));
+  const shore = w * 0.92 - frac * w * 0.72, dunes = 40;
+  g.fillStyle = blend(SAND, SEA, frac); g.fillRect(0, 0, w, h);
+  g.fillStyle = blend(SEA, [10, 60, 110], frac * 0.5); g.fillRect(shore, 0, w - shore, h);
+  g.fillStyle = "#fff"; g.fillRect(shore - 2, 0, 4, h);
+  g.fillStyle = "#6b8f3e"; g.fillRect(0, 0, dunes, h);
+  g.save(); g.translate(dunes / 2, h / 2); g.rotate(-Math.PI / 2);
+  g.fillStyle = "#fff"; g.font = "bold 11px sans-serif"; g.textAlign = "center"; g.textBaseline = "middle";
+  g.fillText("DUNES", 0, 0); g.restore();
+  const dir = rising ? -1 : 1, a = shore - dir * 14, b = shore + dir * 90, y = h / 2;
+  g.strokeStyle = g.fillStyle = colour; g.lineWidth = 12;
+  g.beginPath(); g.moveTo(a, y); g.lineTo(b - dir * 20, y); g.stroke();
+  g.beginPath(); g.moveTo(b, y); g.lineTo(b - dir * 26, y - 20); g.lineTo(b - dir * 26, y + 20); g.fill();
+
+  // Tide curve, 6 h back to 18 h ahead, with a marker for now
+  [g, w, h] = sizeCanvas(document.getElementById("curve"));
+  const top = 34, bottom = h - 26, left = 14, right = w - 14;
+  const t0 = now - 6 * 3600e3, span = 24 * 3600e3;
+  const hs = series.map(s => s[1]), hmin = Math.min(...hs), hmax = Math.max(...hs);
+  const X = t => left + (t - t0) / span * (right - left);
+  const Y = v => bottom - (v - hmin) / (hmax - hmin) * (bottom - top);
+  g.strokeStyle = "#1c6ca8"; g.lineWidth = 3; g.lineJoin = "round"; g.beginPath();
+  series.filter(([t]) => t >= t0 && t <= t0 + span).forEach(([t, v], i) => i ? g.lineTo(X(t), Y(v)) : g.moveTo(X(t), Y(v)));
+  g.stroke();
+  g.font = "11px sans-serif"; g.textAlign = "center"; g.fillStyle = "#333";
+  for (const [t, v, isHigh] of ext) {
+    if (t >= t0 && t <= t0 + span) g.fillText(`${isHigh ? "H" : "L"} ${hhmm(t)}`, X(t), Y(v) + (isHigh ? -10 : 18));
+  }
+  g.strokeStyle = "#999"; g.lineWidth = 1; g.setLineDash([3, 3]);
+  g.beginPath(); g.moveTo(X(now), top - 14); g.lineTo(X(now), bottom); g.stroke(); g.setLineDash([]);
+  g.fillStyle = "#555"; g.fillText("now", X(now), top - 18);
+  g.fillStyle = colour; g.strokeStyle = "#fff"; g.lineWidth = 2;
+  g.beginPath(); g.arc(X(now), Y(height), 7, 0, 2 * Math.PI); g.fill(); g.stroke();
+}
+
+async function tick() {
+  try {
+    if (Date.now() - fetched > 3 * 3600e3) await load();
+    draw();
+  } catch (e) {
+    document.getElementById("state").textContent = "Could not load tide data";
+    document.getElementById("height").textContent = e.message;
+  }
+}
+
+tick();
+setInterval(tick, 30e3);
+addEventListener("resize", tick);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) tick(); });
+</script>
+</body>
+</html>
